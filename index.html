@@ -1667,6 +1667,14 @@
                     </div>
                 </div>
 
+                <div class="control-panel sheet-panel">
+                    <p class="panel-title">Keyboard Mode</p>
+                    <select id="keyboardModeSelect" class="midi-select">
+                        <option value="classic">Classic Harmonium</option>
+                        <option value="swaraQwerty">Swara QWERTY</option>
+                    </select>
+                </div>
+
                 <div class="control-panel sheet-panel sheet-panel-wide">
                     <p class="panel-title">MIDI</p>
                     <div class="midi-row">
@@ -1680,12 +1688,12 @@
     </aside>
 
     <script>
-        const sampleURL = "./harmonium.wav";
-        const reverbURL = "./reverb.wav";
+        const sampleURLs = ["./harmonium.wav", "./harmonium-kannan-orig.wav"];
+        const reverbURLs = ["./reverb.wav"];
         const debug = false;
         const AudioContextClass = window.AudioContext || window.webkitAudioContext;
 
-        const keyboardMap = {
+        const classicKeyboardMap = {
             "s": 53, "S": 53,
             "a": 54, "A": 54,
             "`": 55,
@@ -1752,6 +1760,20 @@
             "s", "a", "`", "1", "q", "2", "w", "e", "4", "r", "5", "t", "y",
             "7", "u", "8", "i", "9", "o", "p", "-", "[", "=", "]", "\\", "'", ";"
         ];
+        const swaraQwertyNoteBindings = {
+            60: "s",
+            62: "r",
+            64: "g",
+            65: "m",
+            67: "p",
+            69: "d",
+            71: "n",
+            72: "S",
+            74: "R",
+            76: "G",
+            77: "M",
+            79: "P"
+        };
 
         const middleC = 60;
         const rootKey = 62;
@@ -1773,6 +1795,7 @@
         let currentOctave = 3;
         let currentTranspose = 0;
         let stackCount = 0;
+        let keyboardMode = "classic";
         let notation = "";
         let lastInputMode = window.matchMedia("(pointer: coarse)").matches ? "Touch" : "Keyboard";
 
@@ -1787,6 +1810,20 @@
         const noteSources = new Map();
         const pointerSources = new Map();
         const activeKeyboardCodes = new Map();
+        const keyboardLayouts = {
+            classic: {
+                label: "Classic Harmonium",
+                keyboardMap: classicKeyboardMap,
+                noteBindings: buildSequentialNoteBindings(desktopKeySequence),
+                notationEnabled: true
+            },
+            swaraQwerty: {
+                label: "Swara QWERTY",
+                keyboardMap: buildKeyboardMapFromBindings(swaraQwertyNoteBindings),
+                noteBindings: swaraQwertyNoteBindings,
+                notationEnabled: false
+            }
+        };
 
         function clamp(value, min, max) {
             return Math.min(max, Math.max(min, value));
@@ -1810,6 +1847,15 @@
             return storedValue == null ? fallback : storedValue === "true";
         }
 
+        function getStoredString(key, fallback) {
+            if (typeof Storage === "undefined") {
+                return fallback;
+            }
+
+            const storedValue = localStorage.getItem(key);
+            return storedValue == null ? fallback : storedValue;
+        }
+
         function saveNumber(key, value) {
             if (typeof Storage !== "undefined") {
                 localStorage.setItem(key, String(value));
@@ -1822,8 +1868,36 @@
             }
         }
 
+        function saveString(key, value) {
+            if (typeof Storage !== "undefined") {
+                localStorage.setItem(key, value);
+            }
+        }
+
         function getCharLength(str) {
             return [...str].length;
+        }
+
+        function buildSequentialNoteBindings(sequence, startNote = 53) {
+            const bindings = {};
+            sequence.forEach((key, index) => {
+                bindings[startNote + index] = key;
+            });
+            return bindings;
+        }
+
+        function buildKeyboardMapFromBindings(noteBindings) {
+            return Object.fromEntries(
+                Object.entries(noteBindings).map(([note, key]) => [key, Number.parseInt(note, 10)])
+            );
+        }
+
+        function getKeyboardLayout() {
+            return keyboardLayouts[keyboardMode] || keyboardLayouts.classic;
+        }
+
+        function getDesktopKeyForNote(note) {
+            return getKeyboardLayout().noteBindings[note] || "";
         }
 
         function normalizeState() {
@@ -1839,6 +1913,10 @@
             currentOctave = getStoredNumber("harmonium.octave", 3);
             currentTranspose = getStoredNumber("harmonium.transpose", 0);
             stackCount = getStoredNumber("harmonium.stack", 0);
+            keyboardMode = getStoredString("harmonium.keyboardMode", "classic");
+            if (!keyboardLayouts[keyboardMode]) {
+                keyboardMode = "classic";
+            }
             normalizeState();
         }
 
@@ -1907,18 +1985,22 @@
 
         function createKeyElement(meta) {
             const element = document.createElement("div");
+            const desktopKey = getDesktopKeyForNote(meta.note);
+            const desktopHint = desktopKey ? formatDesktopKey(desktopKey) : "";
             element.className = `harmonium-key ${meta.isWhite ? "white-key" : "black-key"}`;
             element.dataset.note = String(meta.note);
-            element.dataset.desktopKey = meta.desktopKey;
+            element.dataset.desktopKey = desktopKey;
             element.style.setProperty("--white-index", String(meta.whiteIndex));
             element.setAttribute("role", "button");
             element.setAttribute(
                 "aria-label",
-                `${meta.noteLabel} ${meta.swaraLabel}, keyboard ${formatDesktopKey(meta.desktopKey)}`
+                desktopKey
+                    ? `${meta.noteLabel} ${meta.swaraLabel}, keyboard ${desktopHint}`
+                    : `${meta.noteLabel} ${meta.swaraLabel}`
             );
 
             element.innerHTML = `
-                <span class="desktop-hint">${formatDesktopKey(meta.desktopKey)}</span>
+                <span class="desktop-hint"${desktopKey ? "" : " hidden"}>${desktopHint}</span>
                 <span class="swara-mark">${meta.swaraLabel}</span>
                 <span class="note-mark">${meta.noteLabel}</span>
             `;
@@ -1971,6 +2053,7 @@
             document.getElementById("volumeSlider").value = String(volumeValue);
             document.getElementById("volumeLevel").textContent = `${volumeValue}%`;
             document.getElementById("useReverb").checked = useReverb;
+            document.getElementById("keyboardModeSelect").value = keyboardMode;
             document.getElementById("rootNote").textContent = rootNote;
             document.getElementById("transposeRoot").textContent = rootNote;
             document.getElementById("transposeValue").textContent = formatTransposeValue(currentTranspose);
@@ -2282,7 +2365,7 @@
                 return;
             }
 
-            const note = keyboardMap[event.key];
+            const note = getKeyboardLayout().keyboardMap[event.key];
             if (typeof note === "undefined") {
                 return;
             }
@@ -2323,10 +2406,38 @@
                 activeKeyboardCodes.delete(event.code);
             }
 
-            if (["Backspace", "Delete", "Enter", "Tab"].includes(notationKey) || typeof swaramMap[notationKey] !== "undefined") {
+            if (
+                getKeyboardLayout().notationEnabled
+                && (["Backspace", "Delete", "Enter", "Tab"].includes(notationKey) || typeof swaramMap[notationKey] !== "undefined")
+            ) {
                 event.preventDefault();
                 handleNotationKey(notationKey);
             }
+        }
+
+        function applyKeyboardMode(nextMode, options = {}) {
+            const resolvedMode = keyboardLayouts[nextMode] ? nextMode : "classic";
+            const didChange = keyboardMode !== resolvedMode;
+            keyboardMode = resolvedMode;
+
+            const select = document.getElementById("keyboardModeSelect");
+            if (select) {
+                select.value = keyboardMode;
+            }
+
+            if (!options.skipStorage) {
+                saveString("harmonium.keyboardMode", keyboardMode);
+            }
+
+            if (!didChange) {
+                return;
+            }
+
+            releaseKeyboardSources();
+            silenceAllNotes();
+            buildKeybed();
+            updateResponsiveKeybed();
+            centerKeyboardViewport();
         }
 
         function releaseKeyboardSources() {
@@ -2429,13 +2540,41 @@
             });
         }
 
-        async function loadAudioBuffer(url) {
-            const response = await fetch(url);
-            if (!response.ok) {
-                throw new Error(`Could not load ${url}`);
+        async function loadAudioBuffer(urlOrUrls) {
+            const urls = Array.isArray(urlOrUrls) ? urlOrUrls : [urlOrUrls];
+            const errors = [];
+
+            for (const url of urls) {
+                try {
+                    const response = await fetch(url);
+                    if (!response.ok) {
+                        throw new Error(`Could not load ${url}`);
+                    }
+                    const arrayBuffer = await response.arrayBuffer();
+                    return await decodeAudioData(arrayBuffer);
+                } catch (error) {
+                    errors.push(error instanceof Error ? error.message : String(error));
+                }
             }
-            const arrayBuffer = await response.arrayBuffer();
-            return decodeAudioData(arrayBuffer);
+
+            throw new Error(errors[errors.length - 1] || "Audio fetch failed");
+        }
+
+        function getAudioLoadFailureMessage(error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            if (window.location.protocol === "file:") {
+                return "Audio files need a local web server. Open this project through localhost and try again.";
+            }
+
+            if (errorMessage.includes("harmonium.wav") || errorMessage.includes("harmonium-kannan-orig.wav")) {
+                return "Could not load the harmonium sample file.";
+            }
+
+            if (errorMessage.includes("reverb.wav")) {
+                return "Could not load the reverb file.";
+            }
+
+            return `Could not load audio. ${errorMessage}`;
         }
 
         async function ensureHarmoniumReady() {
@@ -2483,8 +2622,8 @@
                     gainNode.connect(context.destination);
 
                     const [sampleBuffer, hallBuffer] = await Promise.all([
-                        loadAudioBuffer(sampleURL),
-                        loadAudioBuffer(reverbURL)
+                        loadAudioBuffer(sampleURLs),
+                        loadAudioBuffer(reverbURLs)
                     ]);
 
                     audioBuffer = sampleBuffer;
@@ -2519,7 +2658,7 @@
                     context = null;
 
                     setRetryButtonVisible(true, "Retry");
-                    setLoadStatus("Could not load audio.", "Error");
+                    setLoadStatus(getAudioLoadFailureMessage(error), "Error");
                     return false;
                 } finally {
                     loadingPromise = null;
@@ -2657,6 +2796,9 @@
             document.getElementById("settingsBackdrop").addEventListener("click", () => setSettingsOpen(false));
             document.getElementById("refreshMidi").addEventListener("click", requestMIDIAccess);
             document.getElementById("midiInputDevices").addEventListener("change", handleMidiSelectionChange);
+            document.getElementById("keyboardModeSelect").addEventListener("change", (event) => {
+                applyKeyboardMode(event.target.value);
+            });
             document.getElementById("volumeSlider").addEventListener("input", onVolumeChange);
             document.getElementById("useReverb").addEventListener("change", (event) => {
                 updateReverbState(event.target.checked);
