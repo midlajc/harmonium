@@ -752,7 +752,8 @@
         }
 
         .white-key {
-            height: var(--white-key-height);
+            top: -10px;
+            height: var(--white-key-height * 1.10);
             padding-bottom: 0.8rem;
             border: 1px solid rgba(73, 39, 20, 0.28);
             border-radius: 0 0 18px 18px;
@@ -792,10 +793,10 @@
 
         .black-key {
             position: absolute;
-            top: 0;
+            top: -10px;
             left: calc((var(--white-index) + 1) * var(--white-key-width) - (var(--black-key-width) / 2));
             width: var(--black-key-width);
-            height: calc(var(--white-key-height) * 0.64);
+            height: calc(var(--white-key-height) * 0.70);
             padding-bottom: 0.75rem;
             border-radius: 0 0 14px 14px;
             border: 1px solid rgba(255, 226, 170, 0.08);
