@@ -1780,12 +1780,19 @@
         const octaveMap = [-36, -24, -12, 0, 12, 24, 36];
         const loopStart = 0.5;
         const loop = true;
+        const AUDIO_PRELOAD_TIMEOUT_MS = 12000;
+        const AUDIO_DECODE_TIMEOUT_MS = 10000;
+        const AUDIO_UNLOCK_TIMEOUT_MS = 5000;
 
         let context = null;
         let audioBuffer = null;
+        let preloadedSampleBuffer = null;
+        let preloadedReverbBuffer = null;
         let gainNode = null;
         let reverbNode = null;
         let isReverbConnected = false;
+        let preloadPromise = null;
+        let preloadFailed = false;
         let loadingPromise = null;
         let midiAccess = null;
         let selectedMidiDeviceId = "";
@@ -1898,6 +1905,21 @@
 
         function getDesktopKeyForNote(note) {
             return getKeyboardLayout().noteBindings[note] || "";
+        }
+
+        function withTimeout(promise, timeoutMs, message) {
+            let timeoutId = null;
+            const timeoutPromise = new Promise((_, reject) => {
+                timeoutId = window.setTimeout(() => {
+                    reject(new Error(message));
+                }, timeoutMs);
+            });
+
+            return Promise.race([promise, timeoutPromise]).finally(() => {
+                if (timeoutId !== null) {
+                    window.clearTimeout(timeoutId);
+                }
+            });
         }
 
         function normalizeState() {
@@ -2540,7 +2562,7 @@
             });
         }
 
-        async function loadAudioBuffer(urlOrUrls) {
+        async function loadArrayBuffer(urlOrUrls) {
             const urls = Array.isArray(urlOrUrls) ? urlOrUrls : [urlOrUrls];
             const errors = [];
 
@@ -2550,8 +2572,7 @@
                     if (!response.ok) {
                         throw new Error(`Could not load ${url}`);
                     }
-                    const arrayBuffer = await response.arrayBuffer();
-                    return await decodeAudioData(arrayBuffer);
+                    return await response.arrayBuffer();
                 } catch (error) {
                     errors.push(error instanceof Error ? error.message : String(error));
                 }
@@ -2560,10 +2581,69 @@
             throw new Error(errors[errors.length - 1] || "Audio fetch failed");
         }
 
+        async function preloadAudioFiles(options = {}) {
+            const shouldForce = Boolean(options.force);
+
+            if (!shouldForce && preloadedSampleBuffer && preloadedReverbBuffer) {
+                return true;
+            }
+
+            if (!shouldForce && preloadPromise) {
+                return preloadPromise;
+            }
+
+            preloadFailed = false;
+            setRetryButtonVisible(false);
+            if (!document.body.classList.contains("app-ready") && !loadingPromise) {
+                setLoadStatus("Preparing sound files...", "Loading");
+            }
+
+            preloadPromise = (async () => {
+                try {
+                    const [sampleArrayBuffer, reverbArrayBuffer] = await withTimeout(
+                        Promise.all([
+                            loadArrayBuffer(sampleURLs),
+                            loadArrayBuffer(reverbURLs)
+                        ]),
+                        AUDIO_PRELOAD_TIMEOUT_MS,
+                        "Audio preload timed out."
+                    );
+
+                    preloadedSampleBuffer = sampleArrayBuffer;
+                    preloadedReverbBuffer = reverbArrayBuffer;
+                    preloadFailed = false;
+
+                    if (!document.body.classList.contains("app-ready") && !loadingPromise) {
+                        setLoadStatus("Press any key or touch a note to begin.", "Waiting");
+                    }
+                    return true;
+                } catch (error) {
+                    preloadedSampleBuffer = null;
+                    preloadedReverbBuffer = null;
+                    preloadFailed = true;
+                    setRetryButtonVisible(true, "Retry");
+                    setLoadStatus(getAudioLoadFailureMessage(error), "Error");
+                    return false;
+                } finally {
+                    preloadPromise = null;
+                }
+            })();
+
+            return preloadPromise;
+        }
+
         function getAudioLoadFailureMessage(error) {
             const errorMessage = error instanceof Error ? error.message : String(error);
             if (window.location.protocol === "file:") {
                 return "Audio files need a local web server. Open this project through localhost and try again.";
+            }
+
+            if (errorMessage.includes("timed out")) {
+                return "Sound loading timed out. Tap Retry to try again.";
+            }
+
+            if (errorMessage.includes("unlock")) {
+                return "Sound unlock timed out. Tap Retry and try again.";
             }
 
             if (errorMessage.includes("harmonium.wav") || errorMessage.includes("harmonium-kannan-orig.wav")) {
@@ -2587,7 +2667,7 @@
             const loadButton = document.getElementById("loadButton");
             if (context && audioBuffer) {
                 try {
-                    await context.resume();
+                    await withTimeout(context.resume(), AUDIO_UNLOCK_TIMEOUT_MS, "Audio unlock timed out.");
                     document.body.classList.add("app-ready");
                     setRetryButtonVisible(false);
                     setLoadStatus("Sound ready.", "Ready");
@@ -2606,25 +2686,37 @@
                 return loadingPromise;
             }
 
+            if (!preloadedSampleBuffer || !preloadedReverbBuffer) {
+                const preloadReady = await preloadAudioFiles({ force: preloadFailed });
+                if (!preloadReady) {
+                    return false;
+                }
+            }
+
             loadButton.hidden = true;
             loadButton.disabled = true;
-            setLoadStatus("Loading sound...", "Loading");
+            setLoadStatus("Unlocking sound...", "Loading");
 
             loadingPromise = (async () => {
                 try {
                     context = new AudioContextClass();
                     if (context.state === "suspended") {
-                        await context.resume();
+                        await withTimeout(context.resume(), AUDIO_UNLOCK_TIMEOUT_MS, "Audio unlock timed out.");
                     }
 
                     gainNode = context.createGain();
                     gainNode.gain.value = volumeValue / 100;
                     gainNode.connect(context.destination);
 
-                    const [sampleBuffer, hallBuffer] = await Promise.all([
-                        loadAudioBuffer(sampleURLs),
-                        loadAudioBuffer(reverbURLs)
-                    ]);
+                    setLoadStatus("Decoding sound...", "Loading");
+                    const [sampleBuffer, hallBuffer] = await withTimeout(
+                        Promise.all([
+                            decodeAudioData(preloadedSampleBuffer.slice(0)),
+                            decodeAudioData(preloadedReverbBuffer.slice(0))
+                        ]),
+                        AUDIO_DECODE_TIMEOUT_MS,
+                        "Audio decoding timed out."
+                    );
 
                     audioBuffer = sampleBuffer;
                     reverbNode = context.createConvolver();
@@ -2633,7 +2725,7 @@
 
                     initSourceNodes();
                     updateReverbState(useReverb, { skipStorage: true });
-                    await context.resume();
+                    await withTimeout(context.resume(), AUDIO_UNLOCK_TIMEOUT_MS, "Audio unlock timed out.");
 
                     document.body.classList.add("app-ready");
                     setRetryButtonVisible(false);
@@ -2669,6 +2761,7 @@
         }
 
         async function handleManualRetry() {
+            await preloadAudioFiles({ force: true });
             await ensureHarmoniumReady();
         }
 
@@ -2789,6 +2882,7 @@
             resetMidiUI();
             setRetryButtonVisible(false);
             setLoadStatus("Press any key or touch a note to begin.", "Waiting");
+            preloadAudioFiles();
 
             document.getElementById("loadButton").addEventListener("click", handleManualRetry);
             document.getElementById("settingsToggle").addEventListener("click", () => setSettingsOpen());
